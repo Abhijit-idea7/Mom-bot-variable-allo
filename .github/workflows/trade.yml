@@ -1,0 +1,94 @@
+name: Dual Momentum — Monthly Rebalance
+
+# -----------------------------------------------------------------------
+# Run MANUALLY on the LAST TRADING DAY of each month, ~3 PM IST.
+# GitHub Actions UI: Actions → "Dual Momentum — Monthly Rebalance" → Run workflow
+#
+# What it does:
+#   1. Downloads 3 years of price history for the selected universe
+#   2. Checks absolute momentum: Is Nifty 50's 12M-1M return > -5%?
+#      -> NO:  Sells ALL positions (move to cash until next month)
+#      -> YES: Ranks stocks/ETFs by 12M-1M return (Dual Momentum)
+#   3. Sells holdings that have dropped below hold_buffer rank
+#   4. Also sells any position down >15% from entry (hard stop)
+#   5. Buys top ranked stocks/ETFs not already held (fills open slots)
+#   6. Fires CNC delivery market orders via stocksdeveloper -> Zerodha
+#   7. Commits updated positions + trade log CSVs to the repo
+#
+# Universe:
+#   NIFTY200 — top 15 of Nifty 200 stocks  (positions_nifty200.csv)
+#   BEES     — top 5 of BEES ETFs          (positions_bees.csv)
+#
+# No schedule — fully manual. Run on the last trading day of each month.
+# -----------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: "Universe to trade: NIFTY200 (stocks) or BEES (ETFs)"
+        required: false
+        default: "NIFTY200"
+      tranche:
+        description: "Tranche label (e.g. T1, T2, JAN2025). Leave empty for default single-tranche portfolio."
+        required: false
+        default: ""
+      capital:
+        description: "Tranche capital in Rs (e.g. 1500000 for ₹15L). Leave empty to use universe default."
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run? true = preview only, no orders sent (default false)"
+        required: false
+        default: "false"
+
+jobs:
+  monthly-rebalance:
+    name: Monthly Rebalance & Trade (${{ github.event.inputs.universe || 'NIFTY200' }}${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # needed to git push portfolio state back to repo
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monthly rebalance
+        env:
+          STOCKSDEVELOPER_API_KEY: ${{ secrets.STOCKSDEVELOPER_API_KEY }}
+          STOCKSDEVELOPER_ACCOUNT: ${{ secrets.STOCKSDEVELOPER_ACCOUNT }}
+        run: |
+          python main.py \
+            --universe "${{ github.event.inputs.universe || 'NIFTY200' }}" \
+            ${{ github.event.inputs.tranche != '' && format('--tranche {0}', github.event.inputs.tranche) || '' }} \
+            ${{ github.event.inputs.capital  != '' && format('--capital {0}', github.event.inputs.capital)  || '' }} \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+
+      - name: Commit updated portfolio state
+        if: always() && github.event.inputs.dry_run != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add positions_*.csv trade_log_*.csv 2>/dev/null || true
+          TRANCHE_LABEL="${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }}"
+          git diff --staged --quiet && \
+            echo "No portfolio changes to commit." || \
+            git commit -m "Monthly rebalance $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${TRANCHE_LABEL}" && \
+            git push
