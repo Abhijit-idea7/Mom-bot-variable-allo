@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+backtest_results.csv
+backtest_trades.csv
+backtest_performance.csv

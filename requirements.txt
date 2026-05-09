@@ -1,0 +1,6 @@
+yfinance>=0.2.38
+pandas>=2.1.0
+numpy>=1.26.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+pytz>=2024.1
