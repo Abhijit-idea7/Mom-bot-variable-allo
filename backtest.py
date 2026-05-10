@@ -79,12 +79,18 @@ def download_prices(
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Download adjusted close prices for universe + benchmark.
 
-    Downloads in batches of _BATCH_SIZE tickers with up to _DOWNLOAD_RETRIES
-    attempts per batch.  Batching is essential on GitHub Actions where a single
-    large request to Yahoo Finance is routinely rate-limited, returning column
-    names but zero data rows — a failure mode that looks like success.
+    Uses period="max" + group_by="ticker" — the SAME API path as data_feed.py.
+    This is critical: Yahoo Finance has two API endpoints:
 
-    Extends start date by (lookback + skip + 30) calendar days so enough
+      period=  → /v8/finance/chart   (permissive, works from GitHub Actions)
+      start=/end= → download API    (aggressively rate-limited from DC IPs)
+
+    The live bot's data_feed.py uses period= and never has download failures.
+    Using start=/end= here caused all 166 tickers to fail simultaneously on
+    GitHub Actions, returning column names with 0 rows — a silent failure.
+
+    After downloading "max" history we slice to the required date window.
+    Extends the start date by (lookback + skip + 30) calendar days so enough
     history exists before the first rebalance bar.
 
     Returns:
@@ -94,15 +100,17 @@ def download_prices(
     """
     buffer_days    = int((lookback + skip + 30) * 1.45)
     extended_start = pd.Timestamp(start) - timedelta(days=buffer_days)
-    dl_start       = extended_start.strftime("%Y-%m-%d")
+    end_ts         = pd.Timestamp(end)
     ns_tickers     = [f"{s}.NS" for s in symbols]
 
     logger.info(
-        f"Downloading {len(ns_tickers)} universe tickers in batches of "
-        f"{_BATCH_SIZE}  ({dl_start} → {end})..."
+        f"Downloading {len(ns_tickers)} universe tickers in batches of {_BATCH_SIZE} "
+        f"(period=max, then filtering to {extended_start.date()} → {end})..."
     )
 
     # ── Universe: batched download with retry ─────────────────────────────────
+    # Mirror data_feed.fetch_universe_prices() exactly: period=, group_by="ticker",
+    # xs("Close", level=1) — this is the proven path that avoids rate-limiting.
     all_dfs: list[pd.DataFrame] = []
     batches = [
         ns_tickers[i : i + _BATCH_SIZE]
@@ -114,27 +122,27 @@ def download_prices(
             try:
                 raw = yf.download(
                     batch,
-                    start       = dl_start,
-                    end         = end,
+                    period      = "max",     # ← chart API, not download API
+                    interval    = "1d",
                     auto_adjust = True,
                     progress    = False,
+                    group_by    = "ticker",  # ← (Ticker, OHLCV) MultiIndex
                 )
                 if raw.empty:
                     raise ValueError("yfinance returned empty DataFrame")
 
                 if isinstance(raw.columns, pd.MultiIndex):
-                    closes = raw["Close"].copy()
+                    closes = raw.xs("Close", level=1, axis=1).copy()
                 else:
-                    # Single-ticker path: flat columns
+                    # Single-ticker: flat OHLCV columns
                     closes = raw[["Close"]].copy()
                     closes.columns = batch
 
                 closes.columns = [c.replace(".NS", "") for c in closes.columns]
                 closes.index   = pd.to_datetime(closes.index).tz_localize(None)
 
-                # Sanity check: reject if 0 rows even with column names
                 if len(closes) == 0:
-                    raise ValueError("DataFrame has columns but 0 rows")
+                    raise ValueError("DataFrame has columns but 0 data rows")
 
                 all_dfs.append(closes)
                 logger.info(
@@ -153,56 +161,44 @@ def download_prices(
                 else:
                     logger.error(
                         f"  Batch {b_num}/{len(batches)} failed after "
-                        f"{_DOWNLOAD_RETRIES} attempts — skipping this batch."
+                        f"{_DOWNLOAD_RETRIES} attempts — skipping."
                     )
 
     if not all_dfs:
         logger.error(
             "All batches failed — cannot download universe prices. "
-            "Yahoo Finance may be rate-limiting this IP. Try again in a few minutes."
+            "Yahoo Finance may be temporarily unavailable. Try again in a few minutes."
         )
         return pd.DataFrame(), None
 
     stocks = pd.concat(all_dfs, axis=1)
 
-    # Guard: reject if concatenation yielded 0 rows (should not happen, but defensive)
     if len(stocks) == 0:
-        logger.error(
-            "Combined universe DataFrame has 0 rows after concatenation. "
-            "All ticker downloads may have returned column names but no data."
-        )
+        logger.error("Combined DataFrame has 0 rows after concatenation.")
         return pd.DataFrame(), None
 
-    # ── Benchmark: separate download with retry ───────────────────────────────
+    # ── Benchmark: use yf.Ticker().history() — same as data_feed.get_absolute_momentum()
     bench: pd.Series | None = None
     for attempt in range(1, _DOWNLOAD_RETRIES + 1):
         try:
-            raw_b = yf.download(
-                regime_ticker,
-                start       = dl_start,
-                end         = end,
+            raw_b = yf.Ticker(regime_ticker).history(
+                period      = "max",
+                interval    = "1d",
                 auto_adjust = True,
-                progress    = False,
             )
             if raw_b.empty:
-                raise ValueError("empty benchmark response")
+                raise ValueError("empty response")
 
-            # Single-ticker download returns a flat DataFrame with OHLCV columns
-            if isinstance(raw_b.columns, pd.MultiIndex):
-                b_close = raw_b["Close"].iloc[:, 0]   # strip MultiIndex → Series
-            else:
-                b_close = raw_b["Close"]               # already a Series
+            b_close       = raw_b["Close"]
             b_close.index = pd.to_datetime(b_close.index).tz_localize(None)
-            bench = b_close.dropna()
-            logger.info(
-                f"  Benchmark {regime_ticker} OK — {len(bench)} rows"
-            )
+            bench         = b_close.dropna()
+            logger.info(f"  Benchmark {regime_ticker} OK — {len(bench)} rows")
             break
 
         except Exception as exc:
             if attempt < _DOWNLOAD_RETRIES:
                 logger.warning(
-                    f"  Benchmark download attempt {attempt} failed ({exc}). "
+                    f"  Benchmark attempt {attempt} failed ({exc}). "
                     f"Retrying in {_DOWNLOAD_DELAY}s..."
                 )
                 time.sleep(_DOWNLOAD_DELAY)
@@ -213,16 +209,32 @@ def download_prices(
                     f"check will default to RISK-ON."
                 )
 
-    # ── Quality filter (identical to data_feed.py) ────────────────────────────
-    # threshold = 60% of available trading days; drops thinly-traded / new stocks
+    # ── Slice to required date window ─────────────────────────────────────────
+    # We downloaded full history; trim to [extended_start, end] now.
+    stocks = stocks.loc[
+        (stocks.index >= extended_start) & (stocks.index <= end_ts)
+    ]
+    if bench is not None:
+        bench = bench.loc[
+            (bench.index >= extended_start) & (bench.index <= end_ts)
+        ]
+
+    if len(stocks) == 0:
+        logger.error(
+            f"No trading days found between {extended_start.date()} and {end} "
+            "after date filtering. Check your --start/--end dates."
+        )
+        return pd.DataFrame(), bench
+
+    # ── Quality filter (identical to data_feed.fetch_universe_prices) ─────────
+    # Drop symbols with >40% missing rows; forward-fill remaining gaps.
     threshold = int(0.60 * len(stocks))
     stocks    = stocks.dropna(axis=1, thresh=threshold)
-
-    # Forward-fill only (no bfill — avoids look-ahead bias at series start)
-    stocks = stocks.ffill()
+    stocks    = stocks.ffill()
 
     logger.info(
-        f"Universe ready: {len(stocks.columns)} symbols × {len(stocks)} trading days"
+        f"Universe ready: {len(stocks.columns)} symbols × {len(stocks)} trading days "
+        f"({stocks.index[0].date()} → {stocks.index[-1].date()})"
     )
     return stocks, bench
 
