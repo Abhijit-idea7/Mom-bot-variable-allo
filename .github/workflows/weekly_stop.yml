@@ -32,6 +32,10 @@ on:
         description: "Universe to scan: NIFTY200 (stocks) or BEES (ETFs)"
         required: false
         default: "NIFTY200"
+      account:
+        description: "Account name (as defined in accounts.json, e.g. 'default', 'abhi2'). Must match the account used at trade time."
+        required: false
+        default: "default"
       tranche:
         description: "Tranche label to scan (e.g. T1, T2). Must match the label used at trade time. Leave empty for default single-tranche portfolio."
         required: false
@@ -43,7 +47,7 @@ on:
 
 jobs:
   weekly-stop-scan:
-    name: Weekly Hard Stop Check (${{ github.event.inputs.universe || 'NIFTY200' }}${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }})
+    name: Weekly Hard Stop Check (${{ github.event.inputs.universe || 'NIFTY200' }}${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }})
     runs-on: ubuntu-latest
     permissions:
       contents: write     # needed to git push updated positions/trade log back to repo
@@ -74,6 +78,7 @@ jobs:
         run: |
           python weekly_scan.py \
             --universe "${{ github.event.inputs.universe || 'NIFTY200' }}" \
+            --account  "${{ github.event.inputs.account  || 'default'  }}" \
             ${{ github.event.inputs.tranche != '' && format('--tranche {0}', github.event.inputs.tranche) || '' }} \
             ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
 
@@ -85,8 +90,9 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add positions_*.csv trade_log_*.csv 2>/dev/null || true
+          ACCOUNT_LABEL="${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}"
           TRANCHE_LABEL="${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }}"
           git diff --staged --quiet && \
             echo "No stop-outs this week — portfolio unchanged." || \
-            git commit -m "Weekly stop scan $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${TRANCHE_LABEL} exit(s)" && \
+            git commit -m "Weekly stop scan $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${ACCOUNT_LABEL}${TRANCHE_LABEL} exit(s)" && \
             git push

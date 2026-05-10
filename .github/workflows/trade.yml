@@ -29,6 +29,10 @@ on:
         description: "Universe to trade: NIFTY200 (stocks) or BEES (ETFs)"
         required: false
         default: "NIFTY200"
+      account:
+        description: "Account name (as defined in accounts.json, e.g. 'default', 'abhi2'). Leave empty for default."
+        required: false
+        default: "default"
       tranche:
         description: "Tranche label (e.g. T1, T2, JAN2025). Leave empty for default single-tranche portfolio."
         required: false
@@ -44,7 +48,7 @@ on:
 
 jobs:
   monthly-rebalance:
-    name: Monthly Rebalance & Trade (${{ github.event.inputs.universe || 'NIFTY200' }}${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }})
+    name: Monthly Rebalance & Trade (${{ github.event.inputs.universe || 'NIFTY200' }}${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }})
     runs-on: ubuntu-latest
     permissions:
       contents: write     # needed to git push portfolio state back to repo
@@ -75,6 +79,7 @@ jobs:
         run: |
           python main.py \
             --universe "${{ github.event.inputs.universe || 'NIFTY200' }}" \
+            --account  "${{ github.event.inputs.account  || 'default'  }}" \
             ${{ github.event.inputs.tranche != '' && format('--tranche {0}', github.event.inputs.tranche) || '' }} \
             ${{ github.event.inputs.capital  != '' && format('--capital {0}', github.event.inputs.capital)  || '' }} \
             ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
@@ -87,8 +92,9 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add positions_*.csv trade_log_*.csv 2>/dev/null || true
+          ACCOUNT_LABEL="${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}"
           TRANCHE_LABEL="${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }}"
           git diff --staged --quiet && \
             echo "No portfolio changes to commit." || \
-            git commit -m "Monthly rebalance $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${TRANCHE_LABEL}" && \
+            git commit -m "Monthly rebalance $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${ACCOUNT_LABEL}${TRANCHE_LABEL}" && \
             git push

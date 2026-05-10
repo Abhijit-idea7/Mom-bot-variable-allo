@@ -70,6 +70,10 @@ on:
         description: "Position sizing: 'graded' (rank-weighted) or 'equal' (flat). Leave empty for config default."
         required: false
         default: ""
+      account:
+        description: "Account label for output file naming (e.g. default, abhi2). Leave empty for default."
+        required: false
+        default: ""
       tranche:
         description: "Tranche label for output file naming (e.g. T1, T2). Produces separate result CSVs per tranche."
         required: false
@@ -116,6 +120,7 @@ jobs:
             ${{ github.event.inputs.no_abs_filter  == 'true' && '--no-abs-filter'  || '' }} \
             ${{ github.event.inputs.no_weekly_stop == 'true' && '--no-weekly-stop' || '' }} \
             ${{ github.event.inputs.weighting != '' && format('--weighting {0}', github.event.inputs.weighting) || '' }} \
+            ${{ github.event.inputs.account   != '' && format('--account {0}',   github.event.inputs.account)   || '' }} \
             ${{ github.event.inputs.tranche   != '' && format('--tranche {0}',   github.event.inputs.tranche)   || '' }}
 
       - name: Upload backtest results
