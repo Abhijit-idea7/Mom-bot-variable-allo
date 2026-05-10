@@ -509,6 +509,11 @@ def parse_args():
                    help="Disable absolute momentum filter (pure relative momentum)")
     p.add_argument("--no-weekly-stop",  action="store_true",
                    help="Disable weekly Friday stop simulation (default: enabled)")
+    p.add_argument("--account",          default="",
+                   help=(
+                       "Account label for output file naming (e.g. abhi2). "
+                       "Leave empty for default. Produces backtest_results_nifty200_abhi2.csv etc."
+                   ))
     p.add_argument("--tranche",          default="",
                    help=(
                        "Tranche label for output file naming (e.g. T1, T2). "
@@ -552,11 +557,16 @@ def main():
     else:
         weekly_rank_stop = ucfg.weekly_rank_stop
 
-    # Output file names include universe + optional tranche suffix
-    tranche_suffix = f"_{args.tranche.strip().lower()}" if args.tranche.strip() else ""
-    out_results = f"backtest_results_{ucfg.name.lower()}{tranche_suffix}.csv"
-    out_trades  = f"backtest_trades_{ucfg.name.lower()}{tranche_suffix}.csv"
-    out_perf    = f"backtest_performance_{ucfg.name.lower()}{tranche_suffix}.csv"
+    # Output file names include universe + optional account + optional tranche suffix
+    suffix_parts = []
+    if args.account.strip() and args.account.strip().lower() != "default":
+        suffix_parts.append(args.account.strip().lower())
+    if args.tranche.strip():
+        suffix_parts.append(args.tranche.strip().lower())
+    file_suffix = ("_" + "_".join(suffix_parts)) if suffix_parts else ""
+    out_results = f"backtest_results_{ucfg.name.lower()}{file_suffix}.csv"
+    out_trades  = f"backtest_trades_{ucfg.name.lower()}{file_suffix}.csv"
+    out_perf    = f"backtest_performance_{ucfg.name.lower()}{file_suffix}.csv"
 
     sep = "=" * 68
     weighting_label = "GRADED (rank-weighted)" if use_graded else "EQUAL (flat per slot)"

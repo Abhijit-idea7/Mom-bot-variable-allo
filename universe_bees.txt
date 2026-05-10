@@ -1,0 +1,35 @@
+# BEES ETF Universe — NSE symbols, one per line.
+# Lines starting with # are comments and are ignored.
+# No .NS suffix needed — yfinance adds it automatically.
+#
+# To update the universe: edit this file directly on GitHub
+# (click the pencil icon). The bot picks up changes on the next run.
+# Symbols that fail to download are silently dropped by the data feed.
+#
+# Excluded intentionally:
+#   LIQUIDBEES — money-market fund (near-zero return, not a momentum candidate)
+
+# ── Broad equity index ETFs ─────────────────────────────────────────────────
+NIFTYBEES
+JUNIORBEES
+BANKBEES
+
+# ── Sector equity ETFs ──────────────────────────────────────────────────────
+ITBEES
+PHARMABEES
+INFRABEES
+CPSEETF
+PSUBNKBEES
+NIFTYQUALITYBEES
+LOWVOLBEES
+MIDCAPETF
+
+# ── Commodity ETFs ──────────────────────────────────────────────────────────
+GOLDBEES
+SILVERBEES
+
+# ── Other AMC ETFs (same strategy, different fund house) ────────────────────
+SETFNIF50
+HDFCNIFTY
+MON100
+HNGSNGBEES

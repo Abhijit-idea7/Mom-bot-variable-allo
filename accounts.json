@@ -1,0 +1,9 @@
+{
+  "_comment": "Account registry for multi-account stocksdeveloper trading. Safe to commit — stores env var NAMES only, not actual API keys. Add one entry per broker account. Edit this file directly on GitHub to add/remove accounts.",
+
+  "default": {
+    "display_name": "Primary Account (Zerodha)",
+    "api_key_env":  "STOCKSDEVELOPER_API_KEY",
+    "account_id_env": "STOCKSDEVELOPER_ACCOUNT"
+  }
+}

@@ -37,6 +37,7 @@ from datetime import date, datetime
 
 import pytz
 
+from accounts import AccountConfig, get_account
 from config import HARD_STOP_PCT
 from data_feed import fetch_universe_prices, get_current_price
 from momentum_scorer import rank_universe
@@ -83,6 +84,16 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--account", "-a",
+        default="default",
+        metavar="NAME",
+        help=(
+            "Account name to scan (as defined in accounts.json). "
+            "Must match the account used at trade time. "
+            "Default: 'default' (uses STOCKSDEVELOPER_API_KEY)."
+        ),
+    )
+    p.add_argument(
         "--no-rank-stop",
         action="store_true",
         help=(
@@ -103,8 +114,12 @@ def run(
     universe_name: str  = "NIFTY200",
     tranche:       str  = "",
     no_rank_stop:  bool = False,
+    account_name:  str  = "default",
 ) -> None:
-    ucfg: UniverseConfig = apply_tranche(get_universe(universe_name), tranche)
+    account: AccountConfig = get_account(account_name, dry_run=dry_run)
+    ucfg: UniverseConfig   = apply_tranche(
+        get_universe(universe_name), tranche, account=account_name
+    )
     now = datetime.now(IST)
     sep = "=" * 64
     tranche_label = f" [{tranche.upper()}]" if tranche else ""
@@ -127,6 +142,7 @@ def run(
         )
     else:
         logger.info("  Rank stop   : DISABLED (--no-rank-stop)")
+    logger.info(f"  Account     : {account.display_name} ({account.account_id})")
     logger.info(f"  Positions   : {ucfg.positions_file}")
     if dry_run:
         logger.info("  *** DRY RUN — sell orders will NOT be sent to broker ***")
@@ -226,7 +242,7 @@ def run(
                     "reason":      exit_reason,
                 })
             else:
-                ok = sell_delivery(pos.symbol, pos.quantity)
+                ok = sell_delivery(pos.symbol, pos.quantity, account)
                 if ok:
                     log_sell(
                         symbol          = pos.symbol,
@@ -338,4 +354,5 @@ if __name__ == "__main__":
         universe_name = args.universe,
         tranche       = args.tranche,
         no_rank_stop  = args.no_rank_stop,
+        account_name  = args.account,
     )

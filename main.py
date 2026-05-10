@@ -31,6 +31,7 @@ from datetime import date, datetime
 
 import pytz
 
+from accounts import AccountConfig, get_account, list_accounts
 from config import (
     HARD_STOP_PCT,
     MARKET_REGIME_FILTER,
@@ -85,6 +86,17 @@ def parse_args():
             "Total capital for this tranche in Rs (e.g. 1500000 for ₹15L). "
             "Overrides the universe default. Affects graded allocation sizes. "
             "Default: universe config (15,00,000 for NIFTY200, 5,00,000 for BEES)."
+        ),
+    )
+    p.add_argument(
+        "--account", "-a",
+        default="default",
+        metavar="NAME",
+        help=(
+            "Account name to trade under (as defined in accounts.json). "
+            "Each account uses its own API key env var and generates "
+            "account-namespaced positions/trade-log files. "
+            "Default: 'default' (uses STOCKSDEVELOPER_API_KEY)."
         ),
     )
     p.add_argument(
@@ -151,8 +163,12 @@ def run(
     universe_name: str       = "NIFTY200",
     tranche:       str       = "",
     capital:       int | None = None,
+    account_name:  str       = "default",
 ) -> None:
-    ucfg: UniverseConfig = apply_tranche(get_universe(universe_name), tranche, capital)
+    account: AccountConfig   = get_account(account_name, dry_run=dry_run)
+    ucfg: UniverseConfig     = apply_tranche(
+        get_universe(universe_name), tranche, capital, account=account_name
+    )
     now = ist_now()
     tranche_label = f" [{tranche.upper()}]" if tranche else ""
 
@@ -174,6 +190,7 @@ def run(
         logger.info(f"  Portfolio    : top {ucfg.top_n_hold} | Rs{POSITION_SIZE_INR:,.0f}/slot (equal weight)")
     logger.info(f"  Hold buffer  : sell if rank > {ucfg.hold_buffer}")
     logger.info(f"  Hard stop    : {HARD_STOP_PCT:.0%} from entry (monthly check)")
+    logger.info(f"  Account      : {account.display_name} ({account.account_id})")
     logger.info(f"  Positions    : {ucfg.positions_file}")
     logger.info(f"  Trade log    : {ucfg.trade_log_file}")
     if dry_run:
@@ -258,7 +275,7 @@ def run(
                     "reason":      reason,
                 })
             else:
-                ok = sell_delivery(pos.symbol, pos.quantity)
+                ok = sell_delivery(pos.symbol, pos.quantity, account)
                 if ok:
                     log_sell(
                         symbol          = pos.symbol,
@@ -329,7 +346,7 @@ def run(
                         "rank":            r.rank,
                     })
                 else:
-                    ok = buy_delivery(r.symbol, qty)
+                    ok = buy_delivery(r.symbol, qty, account)
                     if ok:
                         log_buy(
                             symbol          = r.symbol,
@@ -392,4 +409,5 @@ if __name__ == "__main__":
         universe_name = args.universe,
         tranche       = args.tranche,
         capital       = args.capital,
+        account_name  = args.account,
     )

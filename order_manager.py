@@ -25,13 +25,12 @@ import logging
 
 import requests
 
+from accounts import AccountConfig
 from config import (
     EXCHANGE,
     ORDER_TYPE,
     POSITION_SIZE_INR,
     PRODUCT_TYPE,
-    STOCKSDEVELOPER_ACCOUNT,
-    STOCKSDEVELOPER_API_KEY,
     STOCKSDEVELOPER_URL,
     VARIETY,
 )
@@ -58,11 +57,11 @@ def _build_payload(symbol: str, trade_type: str, quantity: int) -> dict:
     }
 
 
-def _send_webhook(payload: dict) -> bool:
+def _send_webhook(payload: dict, account: AccountConfig) -> bool:
     """POST to stocksdeveloper and return True on success."""
     params = {
-        "apiKey":  STOCKSDEVELOPER_API_KEY,
-        "account": STOCKSDEVELOPER_ACCOUNT,
+        "apiKey":  account.api_key,
+        "account": account.account_id,
         "group":   "false",
     }
     try:
@@ -77,38 +76,38 @@ def _send_webhook(payload: dict) -> bool:
             logger.info(
                 f"Webhook OK [{resp.status_code}] — "
                 f"{order['tradeType']} {order['symbol']} × {order['quantity']} "
-                f"[{order['productType']}]"
+                f"[{order['productType']}] [{account.name}]"
             )
             return True
         else:
             logger.error(
                 f"Webhook FAILED [{resp.status_code}]: {resp.text} — "
-                f"{order['tradeType']} {order['symbol']}"
+                f"{order['tradeType']} {order['symbol']} [{account.name}]"
             )
             return False
     except requests.RequestException as e:
-        logger.error(f"Webhook exception: {e}")
+        logger.error(f"Webhook exception [{account.name}]: {e}")
         return False
 
 
-def buy_delivery(symbol: str, quantity: int) -> bool:
+def buy_delivery(symbol: str, quantity: int, account: AccountConfig) -> bool:
     """Place a CNC BUY order for delivery."""
     if quantity < 1:
         logger.warning(f"{symbol}: quantity {quantity} invalid, skipping BUY.")
         return False
     payload = _build_payload(symbol, "BUY", quantity)
-    logger.info(f"→ BUY (CNC) {symbol} × {quantity}")
-    return _send_webhook(payload)
+    logger.info(f"→ BUY (CNC) {symbol} × {quantity} [{account.name}]")
+    return _send_webhook(payload, account)
 
 
-def sell_delivery(symbol: str, quantity: int) -> bool:
+def sell_delivery(symbol: str, quantity: int, account: AccountConfig) -> bool:
     """Place a CNC SELL order to exit a delivery position."""
     if quantity < 1:
         logger.warning(f"{symbol}: quantity {quantity} invalid, skipping SELL.")
         return False
     payload = _build_payload(symbol, "SELL", quantity)
-    logger.info(f"→ SELL (CNC) {symbol} × {quantity}")
-    return _send_webhook(payload)
+    logger.info(f"→ SELL (CNC) {symbol} × {quantity} [{account.name}]")
+    return _send_webhook(payload, account)
 
 
 def calculate_quantity(price: float, allocation_inr: float = POSITION_SIZE_INR) -> int:

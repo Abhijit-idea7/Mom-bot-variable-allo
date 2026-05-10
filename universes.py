@@ -19,6 +19,7 @@ Tracked separately:
 from dataclasses import dataclass, replace as _dc_replace
 
 from config import (
+    BEES_UNIVERSE,
     NIFTY200_UNIVERSE,
     TOTAL_CAPITAL_BEES,
     TOTAL_CAPITAL_NIFTY200,
@@ -40,48 +41,6 @@ class UniverseConfig:
     trade_log_file:    str          # CSV that records every BUY/SELL
     total_capital:     int          # total Rs allocated across all slots
     weekly_rank_stop:  int          # weekly_scan exits if rank > this (None = disabled)
-
-
-# ── BEES ETF Universe ─────────────────────────────────────────────────────────
-#
-# Nippon India BeES family + other popular liquid NSE ETFs.
-#
-# Momentum works extremely well on ETFs because:
-#   - Each ETF captures a distinct risk factor (sector/asset class)
-#   - Rotation between asset classes is the core of tactical allocation
-#   - Gold/Silver provide real diversification when equities are weak
-#
-# ETFs excluded intentionally:
-#   LIQUIDBEES — money-market fund (near-zero return, not a momentum candidate)
-#
-# Note: if a symbol is absent from Yahoo Finance (delisted / renamed), the
-# data_feed will silently drop it (>40% missing filter), so extras are safe.
-#
-BEES_UNIVERSE: list[str] = [
-    # ── Broad equity index ETFs ───────────────────────────────────────────────
-    "NIFTYBEES",        # Nippon India ETF Nifty 50 BeES
-    "JUNIORBEES",       # Nippon India ETF Nifty Next 50 Junior BeES
-    "BANKBEES",         # Nippon India ETF Bank Nifty BeES
-
-    # ── Sector equity ETFs ────────────────────────────────────────────────────
-    "ITBEES",           # Nippon India ETF IT BeES
-    "PHARMABEES",       # Nippon India ETF Pharma BeES
-    "INFRABEES",        # Nippon India ETF Infra BeES
-    "CPSEETF",          # Nippon India ETF CPSE (formerly CPSEBEES)
-    "PSUBNKBEES",       # Nippon India ETF PSU Bank BeES
-    "NIFTYQUALITYBEES", # Nippon India ETF Nifty Quality 30 BeES
-    "LOWVOLBEES",       # Nippon India ETF Nifty Low Volatility 30 BeES
-    "MIDCAPETF",        # Nippon India ETF Nifty Midcap 150
-
-    # ── Commodity ETFs ────────────────────────────────────────────────────────
-    "GOLDBEES",         # Nippon India ETF Gold BeES
-    "SILVERBEES",       # Nippon India ETF Silver BeES
-
-    # ── Other AMC ETFs (same strategy, different fund house) ──────────────────
-    "SETFNIF50",        # SBI ETF Nifty 50
-    "HDFCNIFTY",        # HDFC Nifty 50 ETF
-    # MAFANG removed — subscription closed, not available for new investment
-]
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -141,37 +100,40 @@ def apply_tranche(
     ucfg:    UniverseConfig,
     tranche: str,
     capital: int | None = None,
+    account: str        = "",
 ) -> UniverseConfig:
     """
-    Return a copy of ucfg configured for a specific capital tranche.
-
-    Each tranche gets its own positions CSV and trade log CSV so multiple
-    independent portfolio slices can run on the same universe simultaneously.
+    Return a copy of ucfg namespaced to a specific account and/or tranche.
 
     File naming convention:
-        tranche=""    →  positions_nifty200.csv          (original, no suffix)
-        tranche="T1"  →  positions_nifty200_t1.csv
-        tranche="T2"  →  positions_nifty200_t2.csv
-        tranche="JAN2025" → positions_nifty200_jan2025.csv
+        account="",        tranche=""    →  positions_nifty200.csv           (default, no suffix)
+        account="default", tranche=""    →  positions_nifty200.csv           (backward compat)
+        account="",        tranche="T1"  →  positions_nifty200_t1.csv
+        account="abhi2",   tranche=""    →  positions_nifty200_abhi2.csv
+        account="abhi2",   tranche="T1"  →  positions_nifty200_abhi2_t1.csv
 
     Args:
         ucfg:    Base universe config (from get_universe()).
-        tranche: Label string — any alphanumeric name (case-insensitive).
-                 Empty string or None → returns ucfg unchanged (backward compat).
-        capital: Total Rs allocated to this tranche.  Overrides ucfg.total_capital.
-                 Affects graded allocation sizes for the tranche.
-                 None → keeps the universe default.
+        tranche: Tranche label (e.g. "T1", "JAN2025"). Empty = no tranche suffix.
+        capital: Total Rs for this tranche. Overrides ucfg.total_capital.
+        account: Account name. "default" or empty = no account suffix (backward compat).
 
     Returns:
-        A new (frozen) UniverseConfig with tranche-specific file paths.
+        A new (frozen) UniverseConfig with namespaced file paths.
     """
     changes: dict = {}
 
+    suffix_parts: list[str] = []
+    if account and account.strip().lower() != "default":
+        suffix_parts.append(account.strip().lower())
     if tranche:
-        t = tranche.strip().lower()
+        suffix_parts.append(tranche.strip().lower())
+
+    if suffix_parts:
+        suffix = "_".join(suffix_parts)
         n = ucfg.name.lower()
-        changes["positions_file"] = f"positions_{n}_{t}.csv"
-        changes["trade_log_file"] = f"trade_log_{n}_{t}.csv"
+        changes["positions_file"] = f"positions_{n}_{suffix}.csv"
+        changes["trade_log_file"] = f"trade_log_{n}_{suffix}.csv"
 
     if capital is not None:
         changes["total_capital"] = capital

@@ -7,65 +7,44 @@ Strategy: Gary Antonacci's Dual Momentum, adapted for Nifty 200.
   1. Absolute momentum  — Nifty 50 12M-1M return > 6% → risk-on, else → cash
   2. Relative momentum  — buy top 15 Nifty 200 stocks by 12M-1M return
   Rebalance: monthly (last trading day of each month)
+
+Universe symbols are loaded from plain-text files (universe_nifty200.txt,
+universe_bees.txt).  Edit those files directly on GitHub to update the universe
+without touching any Python code.
 """
 
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Nifty 200 Universe  (NSE symbols — no .NS suffix; yfinance adds it)
-# ---------------------------------------------------------------------------
-NIFTY200_UNIVERSE = [
-    # Nifty 50 core
-    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
-    "HINDUNILVR", "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK",
-    "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "HCLTECH",
-    "SUNPHARMA", "BAJFINANCE", "TITAN", "ULTRACEMCO", "WIPRO",
-    "NESTLEIND", "POWERGRID", "NTPC", "TECHM", "ONGC",
-    "M&M", "TATAMOTORS", "TATASTEEL", "ADANIENT", "BAJAJFINSV",
-    "DIVISLAB", "DRREDDY", "CIPLA", "EICHERMOT", "COALINDIA",
-    "JSWSTEEL", "BRITANNIA", "APOLLOHOSP", "BPCL", "HEROMOTOCO",
-    "HINDALCO", "GRASIM", "SBILIFE", "HDFCLIFE", "TATACONSUM",
-    "INDUSINDBK", "ADANIPORTS", "LTIM", "BAJAJ-AUTO",
+_BASE_DIR = Path(__file__).parent
 
-    # Nifty Next 50 / Nifty 100 extension
-    "SIEMENS", "HAVELLS", "PIDILITIND", "DABUR", "MARICO",
-    "COLPAL", "BERGEPAINT", "GODREJCP", "MUTHOOTFIN", "TATAPOWER",
-    "IRCTC", "BANKBARODA", "CANBK", "FEDERALBNK",
-    "INDIGO", "TRENT", "DMART", "ZOMATO",
-    "VEDL", "NMDC", "GAIL", "IOC", "HINDPETRO",
-    "BALKRISIND", "MPHASIS", "LTTS", "COFORGE", "PERSISTENT", "OFSS",
-    "BIOCON", "AUROPHARMA", "TORNTPHARM", "LUPIN", "ALKEM",
-    "PIIND", "VBL", "SHREECEM", "AMBUJACEM", "ACC",
 
-    # Mid-cap quality
-    "CHOLAFIN", "CUMMINSIND", "VOLTAS", "CONCOR",
-    "HINDZINC", "HUDCO", "RVNL", "IRFC", "PFC", "RECLTD",
-    "ICICIGI", "MFSL", "STARHEALTH",
-    "KPITTECH", "INTELLECT",
-    "ESCORTS", "ASHOKLEY", "TVSMOTOR", "EXIDEIND",
-    "AMARARAJA", "BOSCHLTD", "SUNDRMFAST", "SCHAEFFLER", "TIINDIA",
-    "APLAPOLLO", "JSWENERGY", "TORNTPOWER", "CESC", "NHPC", "SJVN",
-    "INDIANB", "BANKINDIA", "UNIONBANK", "IDFCFIRSTB",
-    "RBLBANK", "KARURVYSYA",
-    "ASTRAL", "POLYCAB", "KEI",
-    "IEX", "CAMS", "CDSL", "BSE", "MCX",
-    "ANGELONE", "MOTILALOFS", "360ONE", "ANANDRATHI",
-    "CANFINHOME", "MANAPPURAM",
-    "SBICARD", "BANDHANBNK",
-    "JBCHEPHARM", "PFIZER", "ABBOTINDIA",
-    "LAURUSLABS", "GLENMARK", "GRANULES",
-    "INDHOTEL",
-    "ZYDUSLIFE", "IPCALAB", "AJANTPHARM", "CAPLIPOINT",
-    "HAPPSTMNDS", "INDIAMART", "INFOEDGE",
-    "AFFLE", "LATENTVIEW",
-    "LICI", "ABFRL",
-    "GPPL", "ADANIGREEN", "ADANITRANS",
-    "NCC", "HGINFRA",
-    "NATIONALUM", "SAIL",
-]
+def _load_symbols(filename: str) -> list[str]:
+    """Load NSE symbols from a plain-text file.
+
+    One symbol per line; lines starting with '#' or blank lines are ignored.
+    Returns an empty list if the file does not exist (safe fallback).
+    """
+    path = _BASE_DIR / filename
+    if not path.exists():
+        return []
+    symbols = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.split("#")[0].strip()
+        if s:
+            symbols.append(s)
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Universes  (symbols loaded from plain-text files — edit on GitHub directly)
+# ---------------------------------------------------------------------------
+NIFTY200_UNIVERSE: list[str] = _load_symbols("universe_nifty200.txt")
+BEES_UNIVERSE:     list[str] = _load_symbols("universe_bees.txt")
 
 # ---------------------------------------------------------------------------
 # Dual Momentum Parameters
@@ -150,11 +129,7 @@ ORDER_TIME   = "15:00"     # Target: fire orders before 15:30 market close
 # Stocksdeveloper Webhook  (same endpoint as intraday bot)
 # ---------------------------------------------------------------------------
 STOCKSDEVELOPER_URL     = "https://tv.stocksdeveloper.in/"
+# Legacy single-account env vars — still used as the "default" account fallback.
+# For multi-account support, define accounts in accounts.json instead.
 STOCKSDEVELOPER_API_KEY = os.getenv("STOCKSDEVELOPER_API_KEY")
 STOCKSDEVELOPER_ACCOUNT = os.getenv("STOCKSDEVELOPER_ACCOUNT", "AbhiZerodha")
-
-if not STOCKSDEVELOPER_API_KEY:
-    raise EnvironmentError(
-        "STOCKSDEVELOPER_API_KEY is not set. "
-        "Add it to your .env file or GitHub Actions secrets."
-    )
