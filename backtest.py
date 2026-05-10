@@ -42,6 +42,7 @@ NAV is marked-to-market every trading day for accurate Sharpe/drawdown.
 import argparse
 import logging
 import sys
+import time
 from datetime import timedelta
 from typing import Optional
 
@@ -63,6 +64,11 @@ logger = logging.getLogger("backtest")
 
 # ── Data download ─────────────────────────────────────────────────────────────
 
+_BATCH_SIZE        = 40    # tickers per yfinance call (same as data_feed.py)
+_DOWNLOAD_RETRIES  = 3     # attempts per batch before giving up
+_DOWNLOAD_DELAY    = 5     # seconds between retry attempts
+
+
 def download_prices(
     symbols:  list[str],
     start:    str,
@@ -73,48 +79,151 @@ def download_prices(
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Download adjusted close prices for universe + benchmark.
 
-    Extends start date by (lookback + skip + 30) calendar days to ensure
-    enough history is available before the first rebalance date.
+    Downloads in batches of _BATCH_SIZE tickers with up to _DOWNLOAD_RETRIES
+    attempts per batch.  Batching is essential on GitHub Actions where a single
+    large request to Yahoo Finance is routinely rate-limited, returning column
+    names but zero data rows — a failure mode that looks like success.
+
+    Extends start date by (lookback + skip + 30) calendar days so enough
+    history exists before the first rebalance bar.
 
     Returns:
         (stocks_df, bench_series) — both with tz-naive DatetimeIndex.
-        bench_series is None if the benchmark fails to download.
+        stocks_df is an empty DataFrame on total failure.
+        bench_series is None if the benchmark download fails.
     """
-    # Buffer = trading days needed × ~1.43 (calendar/trading day ratio) + margin
-    buffer_days = int((lookback + skip + 30) * 1.45)
+    buffer_days    = int((lookback + skip + 30) * 1.45)
     extended_start = pd.Timestamp(start) - timedelta(days=buffer_days)
+    dl_start       = extended_start.strftime("%Y-%m-%d")
+    ns_tickers     = [f"{s}.NS" for s in symbols]
 
-    tickers = [f"{s}.NS" for s in symbols] + [regime_ticker]
     logger.info(
-        f"Downloading {len(tickers)} tickers "
-        f"{extended_start.date()} → {end}..."
+        f"Downloading {len(ns_tickers)} universe tickers in batches of "
+        f"{_BATCH_SIZE}  ({dl_start} → {end})..."
     )
 
-    raw = yf.download(
-        tickers,
-        start       = extended_start.strftime("%Y-%m-%d"),
-        end         = end,
-        auto_adjust = True,
-        progress    = True,
-    )
-    closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
-    closes.index = pd.to_datetime(closes.index).tz_localize(None)
+    # ── Universe: batched download with retry ─────────────────────────────────
+    all_dfs: list[pd.DataFrame] = []
+    batches = [
+        ns_tickers[i : i + _BATCH_SIZE]
+        for i in range(0, len(ns_tickers), _BATCH_SIZE)
+    ]
 
-    bench = (
-        closes[regime_ticker].dropna()
-        if regime_ticker in closes.columns else None
-    )
-    stocks = closes.drop(columns=[regime_ticker], errors="ignore").copy()
-    stocks.columns = [c.replace(".NS", "") for c in stocks.columns]
+    for b_num, batch in enumerate(batches, start=1):
+        for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+            try:
+                raw = yf.download(
+                    batch,
+                    start       = dl_start,
+                    end         = end,
+                    auto_adjust = True,
+                    progress    = False,
+                )
+                if raw.empty:
+                    raise ValueError("yfinance returned empty DataFrame")
 
-    # Quality filter: same 60% threshold as data_feed.fetch_universe_prices()
+                if isinstance(raw.columns, pd.MultiIndex):
+                    closes = raw["Close"].copy()
+                else:
+                    # Single-ticker path: flat columns
+                    closes = raw[["Close"]].copy()
+                    closes.columns = batch
+
+                closes.columns = [c.replace(".NS", "") for c in closes.columns]
+                closes.index   = pd.to_datetime(closes.index).tz_localize(None)
+
+                # Sanity check: reject if 0 rows even with column names
+                if len(closes) == 0:
+                    raise ValueError("DataFrame has columns but 0 rows")
+
+                all_dfs.append(closes)
+                logger.info(
+                    f"  Batch {b_num}/{len(batches)} OK — "
+                    f"{len(closes.columns)} tickers, {len(closes)} rows"
+                )
+                break
+
+            except Exception as exc:
+                if attempt < _DOWNLOAD_RETRIES:
+                    logger.warning(
+                        f"  Batch {b_num}/{len(batches)} attempt {attempt} failed "
+                        f"({exc}). Retrying in {_DOWNLOAD_DELAY}s..."
+                    )
+                    time.sleep(_DOWNLOAD_DELAY)
+                else:
+                    logger.error(
+                        f"  Batch {b_num}/{len(batches)} failed after "
+                        f"{_DOWNLOAD_RETRIES} attempts — skipping this batch."
+                    )
+
+    if not all_dfs:
+        logger.error(
+            "All batches failed — cannot download universe prices. "
+            "Yahoo Finance may be rate-limiting this IP. Try again in a few minutes."
+        )
+        return pd.DataFrame(), None
+
+    stocks = pd.concat(all_dfs, axis=1)
+
+    # Guard: reject if concatenation yielded 0 rows (should not happen, but defensive)
+    if len(stocks) == 0:
+        logger.error(
+            "Combined universe DataFrame has 0 rows after concatenation. "
+            "All ticker downloads may have returned column names but no data."
+        )
+        return pd.DataFrame(), None
+
+    # ── Benchmark: separate download with retry ───────────────────────────────
+    bench: pd.Series | None = None
+    for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+        try:
+            raw_b = yf.download(
+                regime_ticker,
+                start       = dl_start,
+                end         = end,
+                auto_adjust = True,
+                progress    = False,
+            )
+            if raw_b.empty:
+                raise ValueError("empty benchmark response")
+
+            # Single-ticker download returns a flat DataFrame with OHLCV columns
+            if isinstance(raw_b.columns, pd.MultiIndex):
+                b_close = raw_b["Close"].iloc[:, 0]   # strip MultiIndex → Series
+            else:
+                b_close = raw_b["Close"]               # already a Series
+            b_close.index = pd.to_datetime(b_close.index).tz_localize(None)
+            bench = b_close.dropna()
+            logger.info(
+                f"  Benchmark {regime_ticker} OK — {len(bench)} rows"
+            )
+            break
+
+        except Exception as exc:
+            if attempt < _DOWNLOAD_RETRIES:
+                logger.warning(
+                    f"  Benchmark download attempt {attempt} failed ({exc}). "
+                    f"Retrying in {_DOWNLOAD_DELAY}s..."
+                )
+                time.sleep(_DOWNLOAD_DELAY)
+            else:
+                logger.warning(
+                    f"  Benchmark {regime_ticker} unavailable after "
+                    f"{_DOWNLOAD_RETRIES} attempts — absolute momentum "
+                    f"check will default to RISK-ON."
+                )
+
+    # ── Quality filter (identical to data_feed.py) ────────────────────────────
+    # threshold = 60% of available trading days; drops thinly-traded / new stocks
     threshold = int(0.60 * len(stocks))
-    stocks = stocks.dropna(axis=1, thresh=threshold)
+    stocks    = stocks.dropna(axis=1, thresh=threshold)
 
     # Forward-fill only (no bfill — avoids look-ahead bias at series start)
     stocks = stocks.ffill()
 
-    logger.info(f"Retained {len(stocks.columns)} stocks after quality filter")
+    logger.info(
+        f"Universe ready: {len(stocks.columns)} symbols × {len(stocks)} trading days"
+    )
     return stocks, bench
 
 
@@ -684,7 +793,13 @@ def main():
     )
 
     if stocks.empty:
-        logger.error("Price download returned empty DataFrame. Aborting.")
+        logger.error(
+            "Price download returned no data. "
+            "Possible causes: (1) Yahoo Finance rate-limited this IP — "
+            "wait a few minutes and re-run; "
+            "(2) universe_*.txt is empty or all symbols are invalid; "
+            "(3) the date range is too short for the lookback window."
+        )
         sys.exit(1)
 
     # When weekly stop is disabled, set weekly_rank_stop to None in a temp params copy
