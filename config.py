@@ -1,16 +1,16 @@
 """
 config.py
 ---------
-Dual Momentum Delivery Bot — Configuration.
+Infrastructure configuration for the Dual Momentum Delivery Bot.
 
-Strategy: Gary Antonacci's Dual Momentum, adapted for Nifty 200.
-  1. Absolute momentum  — Nifty 50 12M-1M return > 6% → risk-on, else → cash
-  2. Relative momentum  — buy top 15 Nifty 200 stocks by 12M-1M return
-  Rebalance: monthly (last trading day of each month)
+This file handles:
+  1. Loading universe symbol lists from plain-text files
+  2. Exposing environment variables (API keys, broker settings)
+  3. Re-exporting strategy parameter constants from strategy.py
 
-Universe symbols are loaded from plain-text files (universe_nifty200.txt,
-universe_bees.txt).  Edit those files directly on GitHub to update the universe
-without touching any Python code.
+STRATEGY PARAMETERS → strategy.py   (lookback, skip, hold_buffer, etc.)
+UNIVERSE SYMBOLS    → universe_nifty200.txt / universe_bees.txt
+API CREDENTIALS     → .env / GitHub Actions secrets → accounts.py
 """
 
 import os
@@ -18,19 +18,37 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Import all strategy defaults so other modules can still do:
+#   from config import MOMENTUM_LOOKBACK_DAYS, HARD_STOP_PCT, ...
+# without needing to change their import lines.
+from strategy import NIFTY200_DEFAULTS as _n200, BEES_DEFAULTS as _bees
+
 load_dotenv()
 
 _BASE_DIR = Path(__file__).parent
 
 
-def _load_symbols(filename: str) -> list[str]:
-    """Load NSE symbols from a plain-text file.
+# ---------------------------------------------------------------------------
+# Universe symbol loading  (edit universe_*.txt files directly on GitHub)
+# ---------------------------------------------------------------------------
 
-    One symbol per line; lines starting with '#' or blank lines are ignored.
-    Returns an empty list if the file does not exist (safe fallback).
+def _load_symbols(filename: str) -> list[str]:
+    """Load NSE symbols from a plain-text universe file.
+
+    Rules:
+      - One symbol per line.
+      - Everything after '#' on a line is a comment and is ignored.
+      - Blank lines are ignored.
+      - Returns [] (with a warning) if the file does not exist.
     """
     path = _BASE_DIR / filename
     if not path.exists():
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Universe file '{filename}' not found in {_BASE_DIR}. "
+            f"Returning empty symbol list. "
+            f"Create the file or restore it from the repository."
+        )
         return []
     symbols = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -40,96 +58,66 @@ def _load_symbols(filename: str) -> list[str]:
     return symbols
 
 
-# ---------------------------------------------------------------------------
-# Universes  (symbols loaded from plain-text files — edit on GitHub directly)
-# ---------------------------------------------------------------------------
 NIFTY200_UNIVERSE: list[str] = _load_symbols("universe_nifty200.txt")
 BEES_UNIVERSE:     list[str] = _load_symbols("universe_bees.txt")
 
-# ---------------------------------------------------------------------------
-# Dual Momentum Parameters
-# ---------------------------------------------------------------------------
-MOMENTUM_LOOKBACK_DAYS      = 252   # ~12 months of trading days
-SKIP_RECENT_DAYS            = 21    # Skip last month (avoids short-term reversal)
-ABSOLUTE_MOMENTUM_THRESHOLD = -0.05  # Nifty 50 12M-1M return must exceed -5% → risk-on
-                                     # Only goes to cash in a genuine bear market (Nifty down >5% YoY)
-                                     # Backtested 2018-2024: CAGR 40.9%, Sharpe 1.32, MaxDD -32.7%
-TOP_N_HOLD                  = 15    # Maximum simultaneous open positions
-HOLD_BUFFER                 = 20    # Keep holding if still in top HOLD_BUFFER (reduces churn)
-MIN_HISTORY_BARS            = 285   # Minimum bars needed: 252 + 21 + 12 buffer
 
 # ---------------------------------------------------------------------------
-# Risk valve  (safety net — not part of original Dual Momentum)
-# Protects against individual stock gap-downs between monthly rebalances.
-# Applied on the monthly rebalance date only. Set to None to disable.
+# Strategy parameters — re-exported from strategy.py for backward compat
+#
+# All values below are sourced from NIFTY200_DEFAULTS in strategy.py.
+# To change them, edit strategy.py. Do NOT override them here.
 # ---------------------------------------------------------------------------
-HARD_STOP_PCT = 0.15    # Sell if position down >15% from entry
 
-# ---------------------------------------------------------------------------
-# Portfolio / Position Sizing
-# ---------------------------------------------------------------------------
+MOMENTUM_LOOKBACK_DAYS      = _n200.lookback_days       # 252
+SKIP_RECENT_DAYS            = _n200.skip_days            # 21
+ABSOLUTE_MOMENTUM_THRESHOLD = _n200.abs_threshold        # -0.05
+MARKET_REGIME_FILTER        = _n200.regime_filter        # True
+REGIME_TICKER               = _n200.regime_ticker        # "^NSEI"
+MIN_HISTORY_BARS            = _n200.min_history_bars     # 285
+TOP_N_HOLD                  = _n200.top_n_hold           # 15
+HOLD_BUFFER                 = _n200.hold_buffer          # 20
+HARD_STOP_PCT               = _n200.hard_stop_pct        # 0.15
+WEIGHTING_SCHEME            = _n200.weighting            # "GRADED"
+TOTAL_CAPITAL_NIFTY200      = _n200.total_capital        # 1_500_000
+TOTAL_CAPITAL_BEES          = _bees.total_capital        # 500_000
+WEEKLY_RANK_STOP_NIFTY200   = _n200.weekly_rank_stop     # 25
+WEEKLY_RANK_STOP_BEES       = _bees.weekly_rank_stop     # 9
+TRANSACTION_COST            = _n200.transaction_cost     # 0.0025
+RISK_FREE_RATE              = _n200.risk_free_rate       # 0.065
+
+# Legacy position-size constant (kept for backward compat; use total_capital now)
 PORTFOLIO_SIZE    = TOP_N_HOLD
-POSITION_SIZE_INR = 100_000    # ₹1 lakh per stock (15 slots = ₹15 lakh)
+POSITION_SIZE_INR = TOTAL_CAPITAL_NIFTY200 // TOP_N_HOLD   # ₹1,00,000
+
 
 # ---------------------------------------------------------------------------
-# Graded Position Sizing  (rank-weighted allocation)
-#
-# Instead of equal ₹1L per slot, the capital is distributed by rank:
-#   weight(rank) = (N + 1 - rank)   →  rank 1 gets N shares, rank N gets 1 share
-#   allocation   = total_capital × weight / sum(1..N)
-#
-# NIFTY200 example (N=15, total=₹15L):
-#   Rank  1 → 15/120 × 15L = ₹1,87,500   Rank  8 → 8/120 × 15L = ₹1,00,000
-#   Rank 15 →  1/120 × 15L = ₹12,500
-#
-# BEES example (N=5, total=₹5L):
-#   Rank 1 → 5/15 × 5L = ₹1,66,667    Rank 5 → 1/15 × 5L = ₹33,333
-#
-# Set WEIGHTING_SCHEME = "EQUAL" to revert to flat ₹POSITION_SIZE_INR per slot.
+# Order settings — CNC Delivery via stocksdeveloper → Zerodha
 # ---------------------------------------------------------------------------
-WEIGHTING_SCHEME       = "GRADED"   # "EQUAL" or "GRADED"
-TOTAL_CAPITAL_NIFTY200 = 1_500_000  # 15 × ₹1L — same total, graded distribution
-TOTAL_CAPITAL_BEES     = 500_000    #  5 × ₹1L
 
-# ---------------------------------------------------------------------------
-# Weekly Rank Stop  (rank-based mid-month exit in weekly_scan.py)
-#
-# Complements the price-based hard stop: if a held stock's momentum rank
-# deteriorates sharply between monthly rebalances, exit immediately rather
-# than waiting until month-end.  Threshold is wider than the monthly
-# hold_buffer to avoid excess churn on small rank fluctuations.
-#
-# Set to None to disable the rank check in weekly_scan.py.
-# ---------------------------------------------------------------------------
-WEEKLY_RANK_STOP_NIFTY200 = 25   # monthly hold_buffer = 20;  weekly exit if rank > 25
-WEEKLY_RANK_STOP_BEES     = 9    # monthly hold_buffer =  7;  weekly exit if rank >  9
-
-# ---------------------------------------------------------------------------
-# Market regime (uses REGIME_TICKER for absolute momentum check)
-# ---------------------------------------------------------------------------
-MARKET_REGIME_FILTER = True
-REGIME_TICKER        = "^NSEI"
-
-# ---------------------------------------------------------------------------
-# File paths  (committed to repo after every rebalance)
-# ---------------------------------------------------------------------------
-POSITIONS_FILE = "positions.csv"
-TRADE_LOG_FILE = "trade_log.csv"
-
-# ---------------------------------------------------------------------------
-# Order settings — NORMAL = CNC Delivery in Zerodha via stocksdeveloper
-# ---------------------------------------------------------------------------
 EXCHANGE     = "NSE"
-PRODUCT_TYPE = "DELIVERY"  # CNC delivery — stocksdeveloper productType for Zerodha CNC
+PRODUCT_TYPE = "DELIVERY"   # CNC delivery
 ORDER_TYPE   = "MARKET"
 VARIETY      = "REGULAR"
-ORDER_TIME   = "15:00"     # Target: fire orders before 15:30 market close
+ORDER_TIME   = "15:00"      # Target: fire orders before 15:30 market close
+
 
 # ---------------------------------------------------------------------------
-# Stocksdeveloper Webhook  (same endpoint as intraday bot)
+# Stocksdeveloper webhook endpoint
 # ---------------------------------------------------------------------------
-STOCKSDEVELOPER_URL     = "https://tv.stocksdeveloper.in/"
-# Legacy single-account env vars — still used as the "default" account fallback.
+
+STOCKSDEVELOPER_URL = "https://tv.stocksdeveloper.in/"
+
+# Legacy single-account env vars — used as the "default" account fallback.
 # For multi-account support, define accounts in accounts.json instead.
+# Do NOT raise here — account validation happens in accounts.py at run time.
 STOCKSDEVELOPER_API_KEY = os.getenv("STOCKSDEVELOPER_API_KEY")
 STOCKSDEVELOPER_ACCOUNT = os.getenv("STOCKSDEVELOPER_ACCOUNT", "AbhiZerodha")
+
+
+# ---------------------------------------------------------------------------
+# Legacy file paths (kept for backward compat; use ucfg.positions_file)
+# ---------------------------------------------------------------------------
+
+POSITIONS_FILE = "positions.csv"
+TRADE_LOG_FILE = "trade_log.csv"

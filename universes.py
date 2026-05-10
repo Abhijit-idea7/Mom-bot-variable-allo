@@ -3,70 +3,98 @@ universes.py
 ------------
 Universe registry for the Dual Momentum Delivery Bot.
 
-Each universe defines its own:
-  - Symbol list (stocks or ETFs)
-  - Portfolio sizing params  (top_n_hold, hold_buffer)
-  - State file paths         (positions CSV, trade-log CSV)
+Each universe bundles:
+  - Symbol list          (loaded from universe_*.txt)
+  - StrategyParams       (all tunable parameters for that universe)
+  - State file paths     (positions CSV, trade-log CSV)
 
-Select at runtime via --universe NIFTY200 or --universe BEES.
-Both universes use identical strategy logic — only the universe params differ.
+The StrategyParams inside UniverseConfig is the authoritative source for every
+strategy number used in live trading and backtesting for that universe.
+There are no separately-hardcoded copies of hold_buffer, top_n_hold, etc.
 
-Tracked separately:
-  NIFTY200 → positions_nifty200.csv + trade_log_nifty200.csv
-  BEES     → positions_bees.csv     + trade_log_bees.csv
+Select universe at runtime:  --universe NIFTY200  or  --universe BEES
+
+File naming convention for multi-account / multi-tranche:
+  account=default, tranche=     → positions_nifty200.csv
+  account=default, tranche=T1   → positions_nifty200_t1.csv
+  account=abhi2,   tranche=     → positions_nifty200_abhi2.csv
+  account=abhi2,   tranche=T1   → positions_nifty200_abhi2_t1.csv
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, replace as _dc_replace
 
-from config import (
-    BEES_UNIVERSE,
-    NIFTY200_UNIVERSE,
-    TOTAL_CAPITAL_BEES,
-    TOTAL_CAPITAL_NIFTY200,
-    WEEKLY_RANK_STOP_BEES,
-    WEEKLY_RANK_STOP_NIFTY200,
-)
+from config import BEES_UNIVERSE, NIFTY200_UNIVERSE
+from strategy import BEES_DEFAULTS, NIFTY200_DEFAULTS, StrategyParams
 
 
-# ── Universe config dataclass ─────────────────────────────────────────────────
+# ── Universe config ───────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class UniverseConfig:
-    name:              str
-    display_name:      str
-    symbols:           tuple        # frozen tuple — immutable after creation
-    top_n_hold:        int          # maximum simultaneous positions
-    hold_buffer:       int          # keep holding until rank exceeds this (monthly)
-    positions_file:    str          # CSV that tracks open positions
-    trade_log_file:    str          # CSV that records every BUY/SELL
-    total_capital:     int          # total Rs allocated across all slots
-    weekly_rank_stop:  int          # weekly_scan exits if rank > this (None = disabled)
+    """All configuration for one trading universe (NIFTY200 or BEES).
+
+    Strategy parameters are embedded in `params` — a frozen StrategyParams
+    instance.  Use the convenience properties (.top_n_hold, .hold_buffer, etc.)
+    to access them; they delegate to params so all code that already uses
+    ucfg.top_n_hold continues to work without modification.
+    """
+
+    name:           str             # "NIFTY200" | "BEES"
+    display_name:   str             # human-readable label
+    symbols:        tuple           # immutable tuple of NSE symbols
+    positions_file: str             # CSV tracking open positions
+    trade_log_file: str             # CSV recording every BUY/SELL
+    params:         StrategyParams  # ALL tunable strategy parameters
+
+    # ── Convenience properties (delegate to params) ───────────────────────
+    # These keep backward compatibility with all existing call sites that
+    # use ucfg.top_n_hold, ucfg.hold_buffer, ucfg.total_capital, etc.
+
+    @property
+    def top_n_hold(self) -> int:
+        return self.params.top_n_hold
+
+    @property
+    def hold_buffer(self) -> int:
+        return self.params.hold_buffer
+
+    @property
+    def total_capital(self) -> int:
+        return self.params.total_capital
+
+    @property
+    def weekly_rank_stop(self):
+        return self.params.weekly_rank_stop
+
+    @property
+    def weighting(self) -> str:
+        return self.params.weighting
+
+    @property
+    def hard_stop_pct(self) -> float:
+        return self.params.hard_stop_pct
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _REGISTRY: dict[str, UniverseConfig] = {
     "NIFTY200": UniverseConfig(
-        name              = "NIFTY200",
-        display_name      = "Nifty 200 Stocks",
-        symbols           = tuple(NIFTY200_UNIVERSE),
-        top_n_hold        = 15,
-        hold_buffer       = 20,
-        positions_file    = "positions_nifty200.csv",
-        trade_log_file    = "trade_log_nifty200.csv",
-        total_capital     = TOTAL_CAPITAL_NIFTY200,
-        weekly_rank_stop  = WEEKLY_RANK_STOP_NIFTY200,
+        name           = "NIFTY200",
+        display_name   = "Nifty 200 Stocks",
+        symbols        = tuple(NIFTY200_UNIVERSE),
+        positions_file = "positions_nifty200.csv",
+        trade_log_file = "trade_log_nifty200.csv",
+        params         = NIFTY200_DEFAULTS,
     ),
     "BEES": UniverseConfig(
-        name              = "BEES",
-        display_name      = "BEES ETFs",
-        symbols           = tuple(BEES_UNIVERSE),
-        top_n_hold        = 5,
-        hold_buffer       = 7,
-        positions_file    = "positions_bees.csv",
-        trade_log_file    = "trade_log_bees.csv",
-        total_capital     = TOTAL_CAPITAL_BEES,
-        weekly_rank_stop  = WEEKLY_RANK_STOP_BEES,
+        name           = "BEES",
+        display_name   = "BEES ETFs",
+        symbols        = tuple(BEES_UNIVERSE),
+        positions_file = "positions_bees.csv",
+        trade_log_file = "trade_log_bees.csv",
+        params         = BEES_DEFAULTS,
     ),
 }
 
@@ -74,13 +102,9 @@ _REGISTRY: dict[str, UniverseConfig] = {
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_universe(name: str) -> UniverseConfig:
-    """Return the UniverseConfig for the given universe name.
+    """Return the UniverseConfig for the given name (case-insensitive).
 
-    Args:
-        name: 'NIFTY200' or 'BEES'  (case-insensitive)
-
-    Raises:
-        ValueError: if name is not recognised
+    Raises ValueError for unrecognised names.
     """
     key = name.upper()
     if key not in _REGISTRY:
@@ -88,7 +112,14 @@ def get_universe(name: str) -> UniverseConfig:
             f"Unknown universe '{name}'. "
             f"Valid choices: {list(_REGISTRY.keys())}"
         )
-    return _REGISTRY[key]
+    ucfg = _REGISTRY[key]
+    if not ucfg.symbols:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Universe '{name}' loaded with 0 symbols. "
+            f"Check that universe_{name.lower()}.txt exists and is non-empty."
+        )
+    return ucfg
 
 
 def list_universes() -> list[str]:
@@ -102,27 +133,28 @@ def apply_tranche(
     capital: int | None = None,
     account: str        = "",
 ) -> UniverseConfig:
-    """
-    Return a copy of ucfg namespaced to a specific account and/or tranche.
+    """Return a copy of ucfg namespaced to a specific account and/or tranche.
 
-    File naming convention:
-        account="",        tranche=""    →  positions_nifty200.csv           (default, no suffix)
-        account="default", tranche=""    →  positions_nifty200.csv           (backward compat)
-        account="",        tranche="T1"  →  positions_nifty200_t1.csv
-        account="abhi2",   tranche=""    →  positions_nifty200_abhi2.csv
-        account="abhi2",   tranche="T1"  →  positions_nifty200_abhi2_t1.csv
+    File naming:
+        account=default, tranche=      → positions_nifty200.csv    (unchanged)
+        account=default, tranche=T1    → positions_nifty200_t1.csv
+        account=abhi2,   tranche=      → positions_nifty200_abhi2.csv
+        account=abhi2,   tranche=T1    → positions_nifty200_abhi2_t1.csv
 
     Args:
         ucfg:    Base universe config (from get_universe()).
-        tranche: Tranche label (e.g. "T1", "JAN2025"). Empty = no tranche suffix.
-        capital: Total Rs for this tranche. Overrides ucfg.total_capital.
-        account: Account name. "default" or empty = no account suffix (backward compat).
+        tranche: Tranche label ("T1", "JAN2025", …). Empty = no suffix.
+        capital: Override total_capital inside params (Rs).
+                 Affects graded allocation sizes for this tranche.
+        account: Account name. "default" or empty → no account suffix
+                 (backward compatible with single-account deployments).
 
     Returns:
-        A new (frozen) UniverseConfig with namespaced file paths.
+        A new (frozen) UniverseConfig with namespaced paths and/or updated capital.
     """
     changes: dict = {}
 
+    # Build filename suffix: [account_]tranche  (skip "default" account)
     suffix_parts: list[str] = []
     if account and account.strip().lower() != "default":
         suffix_parts.append(account.strip().lower())
@@ -135,7 +167,8 @@ def apply_tranche(
         changes["positions_file"] = f"positions_{n}_{suffix}.csv"
         changes["trade_log_file"] = f"trade_log_{n}_{suffix}.csv"
 
+    # Update capital inside params (keeps all other params unchanged)
     if capital is not None:
-        changes["total_capital"] = capital
+        changes["params"] = ucfg.params.replace(total_capital=capital)
 
     return _dc_replace(ucfg, **changes) if changes else ucfg

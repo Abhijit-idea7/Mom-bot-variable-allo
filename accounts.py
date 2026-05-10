@@ -113,10 +113,14 @@ def get_account(name: str = "default", dry_run: bool = False) -> AccountConfig:
             )
 
     if not account_id:
-        raise EnvironmentError(
-            f"Environment variable '{account_var}' is not set. "
-            f"Add it to .env or GitHub Actions secrets for account '{key}'."
-        )
+        if dry_run:
+            account_id = "dry-run-account"
+            logger.warning(f"  {account_var} not set — using placeholder (dry-run mode)")
+        else:
+            raise EnvironmentError(
+                f"Environment variable '{account_var}' is not set. "
+                f"Add it to .env or GitHub Actions secrets for account '{key}'."
+            )
 
     return AccountConfig(
         name         = key,

@@ -1,6 +1,11 @@
-yfinance>=0.2.38
-pandas>=2.1.0
-numpy>=1.26.0
-requests>=2.31.0
-python-dotenv>=1.0.0
-pytz>=2024.1
+# Pinned to exact versions for reproducible runs.
+# To upgrade: change versions here, test the backtest, then commit.
+#
+# yfinance is pinned tightly because it has a history of breaking API changes
+# between minor versions (column structure, auto_adjust behaviour, group_by).
+yfinance==0.2.54
+pandas==2.2.3
+numpy==1.26.4
+requests==2.32.3
+python-dotenv==1.0.1
+pytz==2024.2
