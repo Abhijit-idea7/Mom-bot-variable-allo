@@ -2,17 +2,19 @@ name: Dual Momentum — Backtest
 
 # -----------------------------------------------------------------------
 # Monthly dual momentum backtest — mirrors the exact live bot logic.
-# Rebalances on the last trading day of each month:
-#   1. Absolute momentum check (Nifty 50 12M-1M vs threshold)
-#   2. Relative momentum ranking (12M-1M return, skip last month)
-#   3. Sell holdings outside hold_buffer; buy top portfolio_size
 #
-# NAV is marked-to-market every day for accurate Sharpe/drawdown.
-# Results upload as 3 CSV artifacts (named with universe suffix).
+# Uses the same momentum_scorer.rank_universe() function as live trading.
+# All parameters default to universe config (strategy.py). CLI flags override.
+#
+# Allocation modes:
+#   fixed (default) — size against configured capital, matches live bot.
+#   nav             — size against portfolio NAV (reinvest gains / compounding).
+#
+# Results upload as 3 CSV artifacts (named with universe/account/tranche suffix).
 #
 # Universe:
-#   NIFTY200 — default. top 15 of 200 Nifty stocks.
-#   BEES     — top 5 BEES ETFs. Portfolio size/hold buffer auto-set.
+#   NIFTY200 — default. Top 15 of 200 Nifty stocks.
+#   BEES     — Top 5 BEES ETFs. Portfolio size/hold buffer auto-set.
 # -----------------------------------------------------------------------
 
 on:
@@ -23,68 +25,100 @@ on:
         required: false
         default: "NIFTY200"
       start_date:
-        description: "Start date (YYYY-MM-DD)"
+        description: "Start date (YYYY-MM-DD, default 2018-01-01)"
         required: false
         default: "2018-01-01"
       end_date:
-        description: "End date (YYYY-MM-DD)"
+        description: "End date (YYYY-MM-DD, default 2024-12-31)"
         required: false
         default: "2024-12-31"
-      portfolio_size:
-        description: "Max open positions (leave blank to use universe default: 15 for NIFTY200, 5 for BEES)"
+
+      # ── Capital and sizing ──────────────────────────────────────────────
+      capital:
+        description: "Initial capital in Rs (default: universe default — 1500000 for NIFTY200)"
         required: false
         default: ""
-      capital:
-        description: "Initial capital INR (default 1500000)"
+      portfolio_size:
+        description: "Max open positions (default: universe default — 15 for NIFTY200, 5 for BEES)"
         required: false
-        default: "1500000"
+        default: ""
+      allocation_mode:
+        description: "fixed = match live bot (default). nav = compounding / reinvest gains."
+        required: false
+        default: "fixed"
+
+      # ── Momentum parameters ─────────────────────────────────────────────
       lookback:
         description: "Momentum lookback trading days (default 252 = ~12 months)"
         required: false
-        default: "252"
+        default: ""
       skip:
         description: "Skip-month days to avoid reversal (default 21 = ~1 month)"
         required: false
-        default: "21"
+        default: ""
       abs_threshold:
         description: "Absolute momentum threshold e.g. -0.05 = -5% (default -0.05)"
         required: false
-        default: "-0.05"
+        default: ""
+      no_abs_filter:
+        description: "Disable absolute momentum? true = pure relative (default false)"
+        required: false
+        default: "false"
+
+      # ── Portfolio management ────────────────────────────────────────────
       hold_buffer:
-        description: "Sell if rank drops below this number (leave blank to use universe default: 20 for NIFTY200, 7 for BEES)"
+        description: "Sell if rank > this (default: universe default — 20 for NIFTY200, 7 for BEES)"
         required: false
         default: ""
       hard_stop:
         description: "Hard stop fraction e.g. 0.15 = 15% (default 0.15)"
         required: false
-        default: "0.15"
-      no_abs_filter:
-        description: "Disable absolute momentum? true = pure relative (default false)"
+        default: ""
+      weighting:
+        description: "Position sizing: 'graded' (rank-weighted) or 'equal' (flat). Default: universe default (graded)."
         required: false
-        default: "false"
+        default: ""
       no_weekly_stop:
         description: "Disable weekly Friday stop simulation? true = monthly-only (default false)"
         required: false
         default: "false"
-      weighting:
-        description: "Position sizing: 'graded' (rank-weighted) or 'equal' (flat). Leave empty for config default."
+      weekly_rank_stop:
+        description: "Weekly exit if rank > this (default: universe default — 25 for NIFTY200, 9 for BEES). Pass 0 to disable."
         required: false
         default: ""
+
+      # ── Backtest analysis ───────────────────────────────────────────────
+      transaction_cost:
+        description: "One-way transaction cost fraction e.g. 0.0025 = 0.25% (default 0.0025)"
+        required: false
+        default: ""
+      risk_free_rate:
+        description: "Risk-free rate for Sharpe ratio e.g. 0.065 = 6.5% (default 0.065)"
+        required: false
+        default: ""
+
+      # ── Output naming ───────────────────────────────────────────────────
       account:
-        description: "Account label for output file naming (e.g. default, abhi2). Leave empty for default."
+        description: "Account label for output file naming (e.g. abhi2). Leave empty for default."
         required: false
         default: ""
       tranche:
-        description: "Tranche label for output file naming (e.g. T1, T2). Produces separate result CSVs per tranche."
+        description: "Tranche label for output file naming (e.g. T1, T2)."
         required: false
         default: ""
 
 jobs:
   backtest:
-    name: Run Monthly Backtest (${{ github.event.inputs.universe || 'NIFTY200' }})
+    name: >
+      Backtest (${{ github.event.inputs.universe || 'NIFTY200' }}
+      ${{ github.event.inputs.start_date || '2018' }}–${{ github.event.inputs.end_date || '2024' }}
+      ${{ github.event.inputs.allocation_mode != 'fixed' && github.event.inputs.allocation_mode != '' && format('[{0}]', github.event.inputs.allocation_mode) || '' }})
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # Backtest does not call the broker — these are placeholder values
+      STOCKSDEVELOPER_API_KEY: "backtest-mode"
+      STOCKSDEVELOPER_ACCOUNT: "backtest-mode"
 
     timeout-minutes: 60
 
@@ -102,32 +136,34 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run backtest
-        env:
-          STOCKSDEVELOPER_API_KEY: "backtest-mode"
-          STOCKSDEVELOPER_ACCOUNT: "backtest-mode"
         run: |
           python backtest.py \
-            --universe       "${{ github.event.inputs.universe      || 'NIFTY200' }}" \
-            --start          "${{ github.event.inputs.start_date    || '2018-01-01' }}" \
-            --end            "${{ github.event.inputs.end_date      || '2024-12-31' }}" \
-            --capital        "${{ github.event.inputs.capital        || '1500000' }}" \
-            --lookback       "${{ github.event.inputs.lookback       || '252' }}" \
-            --skip           "${{ github.event.inputs.skip           || '21' }}" \
-            --abs-threshold  "${{ github.event.inputs.abs_threshold  || '-0.05' }}" \
-            --hard-stop      "${{ github.event.inputs.hard_stop      || '0.15' }}" \
-            ${{ github.event.inputs.portfolio_size != '' && format('--portfolio-size {0}', github.event.inputs.portfolio_size) || '' }} \
-            ${{ github.event.inputs.hold_buffer    != '' && format('--hold-buffer {0}',    github.event.inputs.hold_buffer)    || '' }} \
-            ${{ github.event.inputs.no_abs_filter  == 'true' && '--no-abs-filter'  || '' }} \
-            ${{ github.event.inputs.no_weekly_stop == 'true' && '--no-weekly-stop' || '' }} \
-            ${{ github.event.inputs.weighting != '' && format('--weighting {0}', github.event.inputs.weighting) || '' }} \
-            ${{ github.event.inputs.account   != '' && format('--account {0}',   github.event.inputs.account)   || '' }} \
-            ${{ github.event.inputs.tranche   != '' && format('--tranche {0}',   github.event.inputs.tranche)   || '' }}
+            --universe         "${{ github.event.inputs.universe         || 'NIFTY200' }}" \
+            --start            "${{ github.event.inputs.start_date       || '2018-01-01' }}" \
+            --end              "${{ github.event.inputs.end_date         || '2024-12-31' }}" \
+            --allocation-mode  "${{ github.event.inputs.allocation_mode  || 'fixed' }}" \
+            ${{ github.event.inputs.capital          != '' && format('--capital {0}',           github.event.inputs.capital)          || '' }} \
+            ${{ github.event.inputs.portfolio_size   != '' && format('--portfolio-size {0}',    github.event.inputs.portfolio_size)   || '' }} \
+            ${{ github.event.inputs.lookback         != '' && format('--lookback {0}',          github.event.inputs.lookback)         || '' }} \
+            ${{ github.event.inputs.skip             != '' && format('--skip {0}',              github.event.inputs.skip)             || '' }} \
+            ${{ github.event.inputs.abs_threshold    != '' && format('--abs-threshold {0}',     github.event.inputs.abs_threshold)    || '' }} \
+            ${{ github.event.inputs.hold_buffer      != '' && format('--hold-buffer {0}',       github.event.inputs.hold_buffer)      || '' }} \
+            ${{ github.event.inputs.hard_stop        != '' && format('--hard-stop {0}',         github.event.inputs.hard_stop)        || '' }} \
+            ${{ github.event.inputs.weighting        != '' && format('--weighting {0}',         github.event.inputs.weighting)        || '' }} \
+            ${{ github.event.inputs.weekly_rank_stop != '' && format('--weekly-rank-stop {0}',  github.event.inputs.weekly_rank_stop) || '' }} \
+            ${{ github.event.inputs.transaction_cost != '' && format('--transaction-cost {0}',  github.event.inputs.transaction_cost) || '' }} \
+            ${{ github.event.inputs.risk_free_rate   != '' && format('--risk-free-rate {0}',    github.event.inputs.risk_free_rate)   || '' }} \
+            ${{ github.event.inputs.account          != '' && format('--account {0}',           github.event.inputs.account)          || '' }} \
+            ${{ github.event.inputs.tranche          != '' && format('--tranche {0}',           github.event.inputs.tranche)          || '' }} \
+            ${{ github.event.inputs.no_abs_filter    == 'true' && '--no-abs-filter'  || '' }} \
+            ${{ github.event.inputs.no_weekly_stop   == 'true' && '--no-weekly-stop' || '' }}
 
       - name: Upload backtest results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-${{ github.event.inputs.universe || 'NIFTY200' }}-${{ github.event.inputs.start_date || '2018' }}-${{ github.event.inputs.end_date || '2024' }}-run${{ github.run_id }}
+          name: >
+            backtest-${{ github.event.inputs.universe || 'NIFTY200' }}-${{ github.event.inputs.start_date || '2018' }}-${{ github.event.inputs.end_date || '2024' }}-${{ github.event.inputs.allocation_mode || 'fixed' }}-run${{ github.run_id }}
           path: |
             backtest_results_*.csv
             backtest_trades_*.csv

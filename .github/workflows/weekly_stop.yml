@@ -4,42 +4,46 @@ name: Dual Momentum — Weekly Hard Stop Scan
 # Circuit breaker between monthly rebalances.
 #
 # Manual trigger only — run every Friday before 3:30 PM IST.
-# GitHub Actions UI: Actions → "Dual Momentum — Weekly Hard Stop Scan" → Run workflow
+# GitHub Actions UI: Actions → "Dual Momentum — Weekly Hard Stop Scan"
 #
 # Two independent exit triggers (both checked for every open position):
 #
-#   1. PRICE HARD STOP — sell if position is down > 15% from entry price.
-#      Prevents a gap-down disaster from compounding between rebalances.
+#   1. PRICE HARD STOP — sell if position is down > hard_stop_pct (15%)
+#      from entry price.  Prevents a gap-down disaster compounding between
+#      monthly rebalances.
 #
-#   2. RANK STOP (graded strategy enhancement) — downloads full universe
-#      price history, ranks by 12M-1M momentum, and sells if a held stock's
-#      rank has fallen past weekly_rank_stop (default 25 for NIFTY200, 9 for
-#      BEES).  Catches rapid momentum reversals before month-end.
-#      Disable with --no-rank-stop to run price-only (original behaviour).
+#   2. RANK STOP (default enabled) — downloads full universe price history,
+#      ranks by 12M-1M momentum, and sells if a held stock's rank > weekly_rank_stop
+#      (default 25 for NIFTY200, 9 for BEES).  Catches rapid momentum reversals
+#      before month-end.  Disable with no_rank_stop=true for price-only mode.
 #
-# Does NOT open new positions (entries happen at monthly rebalance only).
+# Does NOT open new positions — entries happen at monthly rebalance only.
 #
 # Universe:
-#   NIFTY200 — scans positions_nifty200.csv
-#   BEES     — scans positions_bees.csv
-#   Run separately for each universe you are trading.
+#   NIFTY200 — scans positions_nifty200[_<account>][_<tranche>].csv
+#   BEES     — scans positions_bees[_<account>][_<tranche>].csv
+#   Run separately for each universe/account/tranche you are trading.
 # -----------------------------------------------------------------------
 
 on:
-  workflow_dispatch:          # Manual trigger only — run every Friday before 3:30 PM IST
+  workflow_dispatch:
     inputs:
       universe:
         description: "Universe to scan: NIFTY200 (stocks) or BEES (ETFs)"
         required: false
         default: "NIFTY200"
       account:
-        description: "Account name (as defined in accounts.json, e.g. 'default', 'abhi2'). Must match the account used at trade time."
+        description: "Account name (as defined in accounts.json). Must match the account used at trade time."
         required: false
         default: "default"
       tranche:
-        description: "Tranche label to scan (e.g. T1, T2). Must match the label used at trade time. Leave empty for default single-tranche portfolio."
+        description: "Tranche label to scan (e.g. T1, T2). Must match the label used at trade time. Leave empty for default."
         required: false
         default: ""
+      no_rank_stop:
+        description: "Disable weekly rank-based exit? true = price stop only (default false)"
+        required: false
+        default: "false"
       dry_run:
         description: "Dry run? true = preview only, no orders sent (default false)"
         required: false
@@ -47,14 +51,18 @@ on:
 
 jobs:
   weekly-stop-scan:
-    name: Weekly Hard Stop Check (${{ github.event.inputs.universe || 'NIFTY200' }}${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }})
+    name: >
+      Weekly Hard Stop
+      (${{ github.event.inputs.universe || 'NIFTY200' }}
+      ${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format('@{0}', github.event.inputs.account) || '' }}
+      ${{ github.event.inputs.tranche != '' && format('[{0}]', github.event.inputs.tranche) || '' }})
     runs-on: ubuntu-latest
     permissions:
-      contents: write     # needed to git push updated positions/trade log back to repo
+      contents: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-    timeout-minutes: 25    # increased: weekly_scan now downloads full universe prices for rank-stop check
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -73,14 +81,20 @@ jobs:
 
       - name: Run weekly hard stop scan
         env:
-          STOCKSDEVELOPER_API_KEY: ${{ secrets.STOCKSDEVELOPER_API_KEY }}
-          STOCKSDEVELOPER_ACCOUNT: ${{ secrets.STOCKSDEVELOPER_ACCOUNT }}
+          # Default account secrets
+          STOCKSDEVELOPER_API_KEY:          ${{ secrets.STOCKSDEVELOPER_API_KEY }}
+          STOCKSDEVELOPER_ACCOUNT:          ${{ secrets.STOCKSDEVELOPER_ACCOUNT }}
+          # Additional account secrets (unused unless matching account is selected)
+          # Add more pairs here if you add accounts to accounts.json:
+          #   STOCKSDEVELOPER_API_KEY_ABHI2: ${{ secrets.STOCKSDEVELOPER_API_KEY_ABHI2 }}
+          #   STOCKSDEVELOPER_ACCOUNT_ABHI2: ${{ secrets.STOCKSDEVELOPER_ACCOUNT_ABHI2 }}
         run: |
           python weekly_scan.py \
             --universe "${{ github.event.inputs.universe || 'NIFTY200' }}" \
             --account  "${{ github.event.inputs.account  || 'default'  }}" \
-            ${{ github.event.inputs.tranche != '' && format('--tranche {0}', github.event.inputs.tranche) || '' }} \
-            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+            ${{ github.event.inputs.tranche      != '' && format('--tranche {0}', github.event.inputs.tranche) || '' }} \
+            ${{ github.event.inputs.no_rank_stop == 'true' && '--no-rank-stop' || '' }} \
+            ${{ github.event.inputs.dry_run      == 'true' && '--dry-run'      || '' }}
 
       - name: Commit portfolio changes (only if stops fired, not a dry run)
         if: always() && github.event.inputs.dry_run != 'true'
@@ -92,7 +106,7 @@ jobs:
           git add positions_*.csv trade_log_*.csv 2>/dev/null || true
           ACCOUNT_LABEL="${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}"
           TRANCHE_LABEL="${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }}"
-          git diff --staged --quiet && \
-            echo "No stop-outs this week — portfolio unchanged." || \
-            git commit -m "Weekly stop scan $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${ACCOUNT_LABEL}${TRANCHE_LABEL} exit(s)" && \
-            git push
+          git diff --staged --quiet \
+            && echo "No stop-outs this week — portfolio unchanged." \
+            || ( git commit -m "Weekly stop scan $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${ACCOUNT_LABEL}${TRANCHE_LABEL} exit(s)" \
+                 && git push )

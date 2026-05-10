@@ -6,20 +6,23 @@ name: Dual Momentum — Monthly Rebalance
 #
 # What it does:
 #   1. Downloads 3 years of price history for the selected universe
-#   2. Checks absolute momentum: Is Nifty 50's 12M-1M return > -5%?
-#      -> NO:  Sells ALL positions (move to cash until next month)
-#      -> YES: Ranks stocks/ETFs by 12M-1M return (Dual Momentum)
+#   2. Checks absolute momentum: Is Nifty 50's 12M-1M return > abs_threshold?
+#      → NO:  Sells ALL positions (move to cash until next month)
+#      → YES: Ranks stocks/ETFs by 12M-1M return (Dual Momentum)
 #   3. Sells holdings that have dropped below hold_buffer rank
-#   4. Also sells any position down >15% from entry (hard stop)
-#   5. Buys top ranked stocks/ETFs not already held (fills open slots)
-#   6. Fires CNC delivery market orders via stocksdeveloper -> Zerodha
+#   4. Also sells any position down >hard_stop% from entry (hard stop)
+#   5. Buys top-ranked stocks/ETFs not already held (fills open slots)
+#   6. Fires CNC delivery market orders via stocksdeveloper → Zerodha
 #   7. Commits updated positions + trade log CSVs to the repo
 #
 # Universe:
 #   NIFTY200 — top 15 of Nifty 200 stocks  (positions_nifty200.csv)
 #   BEES     — top 5 of BEES ETFs          (positions_bees.csv)
 #
-# No schedule — fully manual. Run on the last trading day of each month.
+# Multi-account:
+#   Add accounts to accounts.json (no secrets stored there — only env var names).
+#   Add the corresponding secrets to GitHub Actions (repo Settings → Secrets).
+#   Select the account name when triggering this workflow.
 # -----------------------------------------------------------------------
 
 on:
@@ -30,7 +33,7 @@ on:
         required: false
         default: "NIFTY200"
       account:
-        description: "Account name (as defined in accounts.json, e.g. 'default', 'abhi2'). Leave empty for default."
+        description: "Account name (as defined in accounts.json, e.g. 'default', 'abhi2')"
         required: false
         default: "default"
       tranche:
@@ -38,9 +41,25 @@ on:
         required: false
         default: ""
       capital:
-        description: "Tranche capital in Rs (e.g. 1500000 for ₹15L). Leave empty to use universe default."
+        description: "Total capital for this tranche in Rs (e.g. 1500000 for ₹15L). Leave empty to use universe default."
         required: false
         default: ""
+      weighting:
+        description: "Position sizing: 'graded' (rank-weighted) or 'equal' (flat). Leave empty to use universe default (GRADED)."
+        required: false
+        default: ""
+      hard_stop:
+        description: "Hard stop fraction from entry, e.g. 0.15 = 15%. Leave empty to use universe default (0.15)."
+        required: false
+        default: ""
+      abs_threshold:
+        description: "Absolute momentum threshold, e.g. -0.05 = -5%. Leave empty for universe default (-0.05)."
+        required: false
+        default: ""
+      no_abs_filter:
+        description: "Disable absolute momentum filter? true = pure relative momentum. (default false)"
+        required: false
+        default: "false"
       dry_run:
         description: "Dry run? true = preview only, no orders sent (default false)"
         required: false
@@ -48,10 +67,14 @@ on:
 
 jobs:
   monthly-rebalance:
-    name: Monthly Rebalance & Trade (${{ github.event.inputs.universe || 'NIFTY200' }}${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }})
+    name: >
+      Monthly Rebalance
+      (${{ github.event.inputs.universe || 'NIFTY200' }}
+      ${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format('@{0}', github.event.inputs.account) || '' }}
+      ${{ github.event.inputs.tranche != '' && format('[{0}]', github.event.inputs.tranche) || '' }})
     runs-on: ubuntu-latest
     permissions:
-      contents: write     # needed to git push portfolio state back to repo
+      contents: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -74,15 +97,24 @@ jobs:
 
       - name: Run monthly rebalance
         env:
-          STOCKSDEVELOPER_API_KEY: ${{ secrets.STOCKSDEVELOPER_API_KEY }}
-          STOCKSDEVELOPER_ACCOUNT: ${{ secrets.STOCKSDEVELOPER_ACCOUNT }}
+          # Default account secrets
+          STOCKSDEVELOPER_API_KEY:          ${{ secrets.STOCKSDEVELOPER_API_KEY }}
+          STOCKSDEVELOPER_ACCOUNT:          ${{ secrets.STOCKSDEVELOPER_ACCOUNT }}
+          # Additional account secrets (unused unless matching account is selected)
+          # Add more pairs here if you add accounts to accounts.json:
+          #   STOCKSDEVELOPER_API_KEY_ABHI2: ${{ secrets.STOCKSDEVELOPER_API_KEY_ABHI2 }}
+          #   STOCKSDEVELOPER_ACCOUNT_ABHI2: ${{ secrets.STOCKSDEVELOPER_ACCOUNT_ABHI2 }}
         run: |
           python main.py \
-            --universe "${{ github.event.inputs.universe || 'NIFTY200' }}" \
-            --account  "${{ github.event.inputs.account  || 'default'  }}" \
-            ${{ github.event.inputs.tranche != '' && format('--tranche {0}', github.event.inputs.tranche) || '' }} \
-            ${{ github.event.inputs.capital  != '' && format('--capital {0}', github.event.inputs.capital)  || '' }} \
-            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+            --universe "${{ github.event.inputs.universe      || 'NIFTY200' }}" \
+            --account  "${{ github.event.inputs.account       || 'default'  }}" \
+            ${{ github.event.inputs.tranche      != '' && format('--tranche {0}',       github.event.inputs.tranche)      || '' }} \
+            ${{ github.event.inputs.capital      != '' && format('--capital {0}',       github.event.inputs.capital)      || '' }} \
+            ${{ github.event.inputs.weighting    != '' && format('--weighting {0}',     github.event.inputs.weighting)    || '' }} \
+            ${{ github.event.inputs.hard_stop    != '' && format('--hard-stop {0}',     github.event.inputs.hard_stop)    || '' }} \
+            ${{ github.event.inputs.abs_threshold != '' && format('--abs-threshold {0}', github.event.inputs.abs_threshold) || '' }} \
+            ${{ github.event.inputs.no_abs_filter == 'true' && '--no-abs-filter' || '' }} \
+            ${{ github.event.inputs.dry_run      == 'true' && '--dry-run'        || '' }}
 
       - name: Commit updated portfolio state
         if: always() && github.event.inputs.dry_run != 'true'
@@ -94,7 +126,7 @@ jobs:
           git add positions_*.csv trade_log_*.csv 2>/dev/null || true
           ACCOUNT_LABEL="${{ github.event.inputs.account != 'default' && github.event.inputs.account != '' && format(' @{0}', github.event.inputs.account) || '' }}"
           TRANCHE_LABEL="${{ github.event.inputs.tranche != '' && format(' [{0}]', github.event.inputs.tranche) || '' }}"
-          git diff --staged --quiet && \
-            echo "No portfolio changes to commit." || \
-            git commit -m "Monthly rebalance $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${ACCOUNT_LABEL}${TRANCHE_LABEL}" && \
-            git push
+          git diff --staged --quiet \
+            && echo "No portfolio changes to commit." \
+            || ( git commit -m "Monthly rebalance $(date -u '+%Y-%m-%d') — ${{ github.event.inputs.universe || 'NIFTY200' }}${ACCOUNT_LABEL}${TRANCHE_LABEL}" \
+                 && git push )
